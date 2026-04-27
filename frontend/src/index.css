@@ -1,0 +1,2 @@
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e2e8f0; }
