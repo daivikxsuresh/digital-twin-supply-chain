@@ -1,10 +1,11 @@
 """
-Simulates a live ERP/TMS feed by publishing mock CanonicalEvents to Kafka.
-Run while the stack is up to populate the twin with realistic data.
+Simulates a live ERP/TMS feed by publishing CanonicalEvents to Kafka.
+Events are shaped to pass processor Pydantic validation.
 
 Usage:
     python scripts/simulate_kafka_feed.py
-    python scripts/simulate_kafka_feed.py --rate 2  # 2 events/sec per topic
+    python scripts/simulate_kafka_feed.py --rate 2   # 2 events/sec per topic
+    python scripts/simulate_kafka_feed.py --topic supply.orders --count 50
 """
 
 import argparse
@@ -18,101 +19,150 @@ from confluent_kafka import Producer
 
 BOOTSTRAP_SERVERS = "localhost:9092"
 
-SUPPLIERS = ["SUP-001", "SUP-002", "SUP-003"]
-FACILITIES = ["FAC-001", "FAC-002", "DC-001", "DC-002", "DC-003", "STR-001", "STR-002", "STR-003", "STR-004", "STR-005"]
-SKUS = ["SKU-ALPHA", "SKU-BETA", "SKU-GAMMA", "SKU-DELTA", "SKU-EPSILON"]
+SUPPLIERS = ["SUP_001", "SUP_002", "SUP_003"]
+FACILITY_IDS = ["DC_USCA", "DC_USE", "DC_EU", "FAC_001", "FAC_002",
+                "STORE_NY", "STORE_LA", "STORE_CHI", "STORE_LON", "STORE_TKY"]
+DC_IDS = ["DC_USCA", "DC_USE", "DC_EU"]
+PRODUCTS = [
+    {"id": "PROD_001", "name": "Wireless Headphones Pro", "category": "Electronics", "price": 89.99},
+    {"id": "PROD_002", "name": "Smart Watch Series X", "category": "Electronics", "price": 199.99},
+    {"id": "PROD_003", "name": "Running Shorts Elite", "category": "Apparel", "price": 34.99},
+    {"id": "PROD_004", "name": "Yoga Mat Premium", "category": "Fitness", "price": 49.99},
+    {"id": "PROD_005", "name": "Bluetooth Speaker Compact", "category": "Electronics", "price": 59.99},
+]
 CARRIERS = ["FedEx", "UPS", "DHL", "USPS", "XPO"]
-ORDER_STATUSES = ["confirmed", "in_transit", "delivered"]
-SHIPMENT_STATUSES = ["picked_up", "in_transit", "out_for_delivery", "delivered"]
+CUSTOMERS = [
+    {"id": "CUST_001", "name": "Riverside Corp", "segment": "Corporate"},
+    {"id": "CUST_002", "name": "Jane Hoffman", "segment": "Consumer"},
+    {"id": "CUST_003", "name": "Metro Retail Group", "segment": "Wholesale"},
+]
+MARKETS = ["USCA", "US East", "Europe", "Asia Pacific"]
+ORDER_STATUSES = ["PENDING", "PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED"]
+SHIPMENT_STATUSES = ["PENDING", "PICKED_UP", "IN_TRANSIT", "OUT_FOR_DELIVERY", "DELIVERED", "EXCEPTION"]
+SHIP_MODES = ["STANDARD", "SECOND_CLASS", "FIRST_CLASS", "SAME_DAY"]
+DESTINATIONS = [
+    {"city": "New York", "state": "NY", "country": "USA"},
+    {"city": "Los Angeles", "state": "CA", "country": "USA"},
+    {"city": "Chicago", "state": "IL", "country": "USA"},
+    {"city": "London", "state": None, "country": "UK"},
+    {"city": "Tokyo", "state": None, "country": "Japan"},
+]
 
 
-def now_iso() -> str:
+def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def rand_date(days_offset: int = 0) -> str:
-    dt = datetime.now(timezone.utc) + timedelta(days=days_offset + random.randint(-2, 2))
+def _dt(days_offset: int = 0) -> str:
+    dt = datetime.now(timezone.utc) + timedelta(days=days_offset + random.randint(-1, 1))
     return dt.isoformat()
 
 
-def make_order_event() -> dict:
-    origin = random.choice(SUPPLIERS)
-    dest = random.choice([f for f in FACILITIES if f.startswith("DC") or f.startswith("FAC")])
+def _envelope(event_type: str, source_system: str, payload: dict) -> dict:
     return {
         "event_id": str(uuid.uuid4()),
-        "event_type": "order.updated",
-        "source_system": "CSV_ERP",
-        "occurred_at": now_iso(),
-        "payload": {
-            "external_id": f"PO-{random.randint(10000, 99999)}",
-            "source_system": "CSV_ERP",
-            "order_type": "purchase",
-            "status": random.choice(ORDER_STATUSES),
-            "origin_facility_id": origin,
-            "destination_facility_id": dest,
-            "sku_id": random.choice(SKUS),
-            "quantity": round(random.uniform(50, 500), 2),
-            "unit_of_measure": "units",
-            "requested_delivery_date": rand_date(7),
-            "confirmed_delivery_date": rand_date(6),
-            "actual_delivery_date": rand_date(5) if random.random() > 0.4 else None,
-            "unit_cost": round(random.uniform(10, 200), 2),
-            "currency": "USD",
-        },
+        "event_type": event_type,
+        "source_system": source_system,
+        "occurred_at": _now(),
+        "payload": payload,
     }
 
 
-def make_shipment_event() -> dict:
-    origin = random.choice([f for f in FACILITIES if f.startswith("DC") or f.startswith("FAC")])
-    dest = random.choice([f for f in FACILITIES if f.startswith("STR")])
-    return {
-        "event_id": str(uuid.uuid4()),
-        "event_type": "shipment.updated",
+def make_order_event() -> tuple[str, str, dict]:
+    customer = random.choice(CUSTOMERS)
+    dest = random.choice(DESTINATIONS)
+    products = random.sample(PRODUCTS, k=random.randint(1, 3))
+    items = []
+    total = 0.0
+    for p in products:
+        qty = random.randint(1, 10)
+        discount = random.choice([0.0, 0.05, 0.10])
+        item_total = round(qty * p["price"] * (1 - discount), 2)
+        total += item_total
+        items.append({
+            "product_id": p["id"],
+            "product_name": p["name"],
+            "category": p["category"],
+            "quantity": qty,
+            "unit_price": p["price"],
+            "discount": discount,
+            "total": item_total,
+        })
+    external_id = f"SIM_{random.randint(10000, 99999)}"
+    payload = {
+        "external_id": external_id,
+        "source_system": "CSV_ERP",
+        "customer_id": customer["id"],
+        "customer_name": customer["name"],
+        "customer_segment": customer["segment"],
+        "items": items,
+        "status": random.choice(ORDER_STATUSES),
+        "market": random.choice(MARKETS),
+        "region": random.choice(["West", "East", "Central", "Europe", "APAC"]),
+        "destination_city": dest["city"],
+        "destination_state": dest["state"],
+        "destination_country": dest["country"],
+        "ordered_at": _dt(-random.randint(1, 30)),
+        "total_amount": round(total, 2),
+        "profit": round(total * random.uniform(0.05, 0.25), 2),
+    }
+    key = f"CSV_ERP:{external_id}"
+    return "supply.orders", key, _envelope("order.updated", "CSV_ERP", payload)
+
+
+def make_shipment_event() -> tuple[str, str, dict]:
+    external_id = f"SHIP_SIM_{random.randint(10000, 99999)}"
+    dest = random.choice(DESTINATIONS)
+    status = random.choice(SHIPMENT_STATUSES)
+    departed = _dt(-random.randint(1, 5))
+    promised_days = random.randint(3, 10)
+    actual_days = promised_days + random.randint(-1, 5)
+    payload = {
+        "external_id": external_id,
         "source_system": "CSV_TMS",
-        "occurred_at": now_iso(),
-        "payload": {
-            "external_id": f"SHIP-{random.randint(10000, 99999)}",
-            "source_system": "CSV_TMS",
-            "order_id": f"PO-{random.randint(10000, 99999)}",
-            "carrier": random.choice(CARRIERS),
-            "tracking_number": f"TRK{random.randint(100000000, 999999999)}",
-            "status": random.choice(SHIPMENT_STATUSES),
-            "origin_facility_id": origin,
-            "destination_facility_id": dest,
-            "scheduled_pickup": rand_date(-3),
-            "actual_pickup": rand_date(-2),
-            "scheduled_delivery": rand_date(2),
-            "actual_delivery": rand_date(1) if random.random() > 0.5 else None,
-            "current_latitude": round(random.uniform(25.0, 48.0), 6),
-            "current_longitude": round(random.uniform(-122.0, -71.0), 6),
-            "cost": round(random.uniform(50, 800), 2),
-            "currency": "USD",
-        },
+        "order_id": f"SIM_{random.randint(10000, 99999)}",
+        "carrier": random.choice(CARRIERS),
+        "shipping_mode": random.choice(SHIP_MODES),
+        "status": status,
+        "origin_facility_id": random.choice(DC_IDS),
+        "destination_city": dest["city"],
+        "destination_state": dest["state"],
+        "destination_country": dest["country"],
+        "departed_at": departed,
+        "promised_transit_days": promised_days,
+        "actual_transit_days": actual_days if status == "DELIVERED" else None,
+        "actual_delivery_at": _dt(0) if status == "DELIVERED" else None,
+        "late_delivery_risk": actual_days > promised_days,
+        # Extra fields picked up by shipment processor for location hypertable
+        "current_latitude": round(random.uniform(25.0, 48.0), 6),
+        "current_longitude": round(random.uniform(-122.0, -71.0), 6),
     }
+    key = f"CSV_TMS:{external_id}"
+    return "supply.shipments", key, _envelope("shipment.updated", "CSV_TMS", payload)
 
 
-def make_inventory_event() -> dict:
-    facility = random.choice(FACILITIES)
-    return {
-        "event_id": str(uuid.uuid4()),
-        "event_type": "inventory.snapshot",
+def make_inventory_event() -> tuple[str, str, dict]:
+    facility = random.choice(DC_IDS)
+    product = random.choice(PRODUCTS)
+    external_id = f"{facility}_{product['id']}"
+    qty = round(random.uniform(0, 1000), 2)
+    payload = {
+        "external_id": external_id,
         "source_system": "CSV_ERP",
-        "occurred_at": now_iso(),
-        "payload": {
-            "external_id": f"INV-{facility}-{random.choice(SKUS)}",
-            "source_system": "CSV_ERP",
-            "facility_id": facility,
-            "sku_id": random.choice(SKUS),
-            "quantity_on_hand": round(random.uniform(0, 1000), 2),
-            "quantity_reserved": round(random.uniform(0, 200), 2),
-            "quantity_in_transit": round(random.uniform(0, 300), 2),
-            "unit_cost": round(random.uniform(10, 200), 2),
-            "snapshot_timestamp": now_iso(),
-        },
+        "facility_id": facility,
+        "product_id": product["id"],
+        "product_name": product["name"],
+        "quantity_on_hand": qty,
+        "quantity_reserved": round(random.uniform(0, qty * 0.2), 2),
+        "unit_cost": round(product["price"] * 0.6, 2),
+        "safety_stock_level": round(qty * 0.15, 2),
+        "snapshotted_at": _now(),
     }
+    key = f"CSV_ERP:{external_id}"
+    return "supply.inventory", key, _envelope("inventory.snapshot", "CSV_ERP", payload)
 
 
-TOPIC_GENERATORS = {
+GENERATORS = {
     "supply.orders": make_order_event,
     "supply.shipments": make_shipment_event,
     "supply.inventory": make_inventory_event,
@@ -121,36 +171,49 @@ TOPIC_GENERATORS = {
 
 def delivery_report(err, msg):
     if err:
-        print(f"  [ERROR] Failed to deliver to {msg.topic()}: {err}")
+        print(f"  [FAIL] {msg.topic()}: {err}")
 
 
-def main(rate: float):
+def main(rate: float, topic_filter: str | None, count: int | None):
     producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
     interval = 1.0 / rate
-    print(f"Publishing {rate} event/sec per topic to {BOOTSTRAP_SERVERS}")
-    print("Press Ctrl+C to stop.\n")
+    generators = (
+        {topic_filter: GENERATORS[topic_filter]}
+        if topic_filter and topic_filter in GENERATORS
+        else GENERATORS
+    )
+    published = 0
+    print(f"Publishing {rate} event/sec per topic → {BOOTSTRAP_SERVERS}")
+    print("Ctrl+C to stop.\n")
 
     try:
         while True:
-            for topic, generator in TOPIC_GENERATORS.items():
-                event = generator()
+            for topic, gen in generators.items():
+                actual_topic, key, event = gen()
                 producer.produce(
-                    topic=topic,
-                    key=event["payload"]["external_id"],
-                    value=json.dumps(event),
+                    topic=actual_topic,
+                    key=key.encode(),
+                    value=json.dumps(event, default=str).encode(),
                     callback=delivery_report,
                 )
-                print(f"  → {topic}: {event['event_type']} [{event['payload']['external_id']}]")
+                print(f"  → {actual_topic}: {event['event_type']} [{event['payload']['external_id']}]")
+                published += 1
+                if count and published >= count:
+                    raise KeyboardInterrupt
             producer.poll(0)
             time.sleep(interval)
     except KeyboardInterrupt:
-        print("\nFlushing remaining messages...")
+        pass
+    finally:
+        print(f"\nFlushing... ({published} events published)")
         producer.flush()
         print("Done.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rate", type=float, default=1.0, help="Events per second per topic")
+    parser.add_argument("--rate", type=float, default=1.0, help="Events/sec per topic")
+    parser.add_argument("--topic", type=str, default=None, help="Publish to one topic only")
+    parser.add_argument("--count", type=int, default=None, help="Stop after N total events")
     args = parser.parse_args()
-    main(args.rate)
+    main(args.rate, args.topic, args.count)
