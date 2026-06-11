@@ -2,6 +2,9 @@
 
 A production-grade Digital Twin for supply chain operations. Integrates with any ERP or TMS via a generic adapter pattern, provides real-time simulation, KPI analytics, and writeback capabilities.
 
+
+**🌐 Live site & interactive demo:** [TwinFlow](https://daivikxsuresh.github.io/twinflow/) · [Launch demo](https://daivikxsuresh.github.io/twinflow/demo/)
+
 ## Quick Start
 
 ```bash
