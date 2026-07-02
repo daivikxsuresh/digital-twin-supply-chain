@@ -17,6 +17,7 @@ from app.db.session import AsyncSessionLocal
 from app.ingest import topics as T
 from app.ingest.consumer import BaseConsumer
 from app.models.order import Order
+from app.twin.engine import twin_engine
 
 logger = structlog.get_logger(__name__)
 
@@ -78,5 +79,4 @@ class OrderProcessor(BaseConsumer):
             source_system=order.source_system,
         )
 
-        # Phase 2 hook: signal twin engine to update graph node for this order
-        # await twin_engine.handle_event(event)  # wired up in Phase 2
+        await twin_engine.handle_event(event)

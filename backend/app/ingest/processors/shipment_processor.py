@@ -18,6 +18,7 @@ from app.ingest import topics as T
 from app.ingest.consumer import BaseConsumer
 from app.models.inventory import ShipmentLocationEvent
 from app.models.shipment import Shipment
+from app.twin.engine import twin_engine
 
 logger = structlog.get_logger(__name__)
 
@@ -95,5 +96,4 @@ class ShipmentProcessor(BaseConsumer):
             order_id=shipment.order_id,
         )
 
-        # Phase 2 hook: update shipment state machine in twin engine
-        # await twin_engine.handle_event(event)
+        await twin_engine.handle_event(event)
